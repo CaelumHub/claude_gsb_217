@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+{% block title %}合并拼接{% endblock %}
+{% block content %}
+<div class="main-head">
+  <div>
+    <h1>合并拼接</h1>
+    <div class="sub">把多个文件（或同一文件的多个片段）按顺序首尾相接 · 交叉淡化 / 硬拼接 · 自动统一采样率与声道</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">1. 选择音频与片段</h2>
+    <div class="row">
+      <select id="fileSel" style="min-width:220px"></select>
+      <button id="loadBtn">加载波形</button>
+    </div>
+  </div>
+  <div class="plot"><canvas id="wave" style="height:150px"></canvas></div>
+  <div class="row mt small">
+    <span id="selLabel" class="muted">在波形上拖拽选择片段，或直接输入起止时间</span>
+    <span class="spacer"></span>
+    <label class="field inline">起点(s) <input type="number" id="segStart" value="0" min="0" step="0.01" style="width:90px"/></label>
+    <label class="field inline">终点(s) <input type="number" id="segEnd" value="0" min="0" step="0.01" style="width:90px"/></label>
+    <button class="btn-primary" id="addRegion">+ 添加片段</button>
+    <button id="addWhole">添加整个文件</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row between mb">
+    <h2 style="margin:0">2. 拼接顺序 <span id="segCount" class="badge neutral"></span></h2>
+    <span id="totalLabel" class="muted small"></span>
+  </div>
+  <div id="segList"></div>
+  <div class="small muted mt">用 ↑ ↓ 调整顺序；最终时长 = 各片段时长之和 − 交叉淡化重叠（硬拼接无重叠）。</div>
+</div>
+
+<div class="card">
+  <h2>3. 拼接设置</h2>
+  <div class="row">
+    <label class="field inline">过渡方式
+      <select id="joinMode">
+        <option value="xfade" selected>交叉淡化（平滑过渡）</option>
+        <option value="hard">硬拼接（无过渡）</option>
+      </select>
+    </label>
+    <label class="field inline">淡化时长(s)
+      <input type="number" id="fadeSec" value="0.5" min="0.05" max="10" step="0.05" style="width:80px"/>
+    </label>
+    <label class="field inline">淡化曲线
+      <select id="curve">
+        <option value="equal_power" selected>等功率（自然响度）</option>
+        <option value="linear">线性</option>
+      </select>
+    </label>
+  </div>
+  <div class="row mt">
+    <label class="field inline">输出采样率
+      <select id="outSr">
+        <option value="" selected>自动（取最高）</option>
+        <option value="22050">22050</option>
+        <option value="44100">44100</option>
+        <option value="48000">48000</option>
+      </select>
+    </label>
+    <label class="field inline">输出声道
+      <select id="outCh">
+        <option value="" selected>自动（取最多）</option>
+        <option value="1">单声道</option>
+        <option value="2">立体声</option>
+      </select>
+    </label>
+    <label class="field inline">文件名 <input type="text" id="outName" value="拼接结果.wav" style="width:180px"/></label>
+    <span class="spacer"></span>
+    <button class="btn-green" id="concatBtn" style="font-size:15px;padding:10px 20px">▶ 开始拼接</button>
+  </div>
+</div>
+
+<div class="card hidden" id="resultCard">
+  <h2>拼接结果</h2>
+  <div class="row" id="resultRow"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let library = [], segments = [], env = null, currentFile = null;
+let selStart = null, selEnd = null, dragging = false;
+
+async function loadFiles(keepSel) {
+  const prev = $("#fileSel").value;
+  library = await API.get("/api/library");
+  $("#fileSel").innerHTML = library.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
+  if (keepSel && prev) $("#fileSel").value = prev;
+}
+
+function curFile() { return library.find(f => f.id === $("#fileSel").value); }
+
+async function loadWave() {
+  const f = curFile();
+  if (!f) return;
+  currentFile = f;
+  env = await API.get(`/api/audio/${f.id}/waveform?points=2000`);
+  selStart = selEnd = null;
+  $("#segStart").value = 0;
+  $("#segEnd").value = env.duration.toFixed(2);
+  $("#selLabel").textContent =
+    `${f.name} · ${env.duration.toFixed(2)}s · ${env.sr} Hz · ${env.channels} 声道 — 拖拽选择片段`;
+  draw();
+}
+
+function draw() {
+  drawWaveform($("#wave"), env || { mins: [], maxs: [] }, {
+    selection: (selStart != null && selEnd != null)
+      ? [Math.min(selStart, selEnd), Math.max(selStart, selEnd)] : null,
+  });
+}
+
+/* ---- drag selection on the waveform (same pattern as the waveform editor) */
+const wave = $("#wave");
+wave.addEventListener("mousedown", e => {
+  if (!env) return;
+  const r = wave.getBoundingClientRect();
+  dragging = true;
+  selStart = (e.clientX - r.left) / r.width;
+  selEnd = selStart;
+  draw();
+});
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  const r = wave.getBoundingClientRect();
+  selEnd = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  draw();
+});
+window.addEventListener("mouseup", () => {
+  if (!dragging) return;
+  dragging = false;
+  if (env && selStart != null && Math.abs(selEnd - selStart) > 0.0005) {
+    const a = Math.min(selStart, selEnd) * env.duration;
+    const b = Math.max(selStart, selEnd) * env.duration;
+    $("#segStart").value = a.toFixed(2);
+    $("#segEnd").value = b.toFixed(2);
+    $("#selLabel").textContent = `选区 ${a.toFixed(2)}s – ${b.toFixed(2)}s（${(b - a).toFixed(2)}s）`;
+  }
+});
+
+/* ---- segment list ------------------------------------------------------- */
+
+function addSegment(file, start, end) {
+  segments.push({
+    file_id: file.id, name: file.name, sr: file.sr, channels: file.channels,
+    start: +start, end: +end,
+  });
+  renderSegments();
+}
+
+$("#addWhole").onclick = () => {
+  const f = curFile();
+  if (!f) return toast("请先选择文件", "warn");
+  addSegment(f, 0, f.duration);
+};
+
+$("#addRegion").onclick = () => {
+  const f = curFile();
+  if (!f) return toast("请先选择文件", "warn");
+  let a = +$("#segStart").value, b = +$("#segEnd").value;
+  a = Math.max(0, Math.min(a, f.duration));
+  b = Math.max(0, Math.min(b, f.duration));
+  if (b - a < 0.005) return toast("片段太短或起止时间无效", "warn");
+  addSegment(f, a, b);
+};
+
+function currentFade() {
+  return $("#joinMode").value === "xfade" ? Math.max(0, +$("#fadeSec").value || 0) : 0;
+}
+
+function renderSegments() {
+  const box = $("#segList");
+  $("#segCount").textContent = segments.length + " 段";
+  if (!segments.length) {
+    box.innerHTML = `<div class="muted">还没有片段 — 从上方添加（至少 2 段，可重复添加同一文件的不同片段）。</div>`;
+    $("#totalLabel").textContent = "";
+    return;
+  }
+  box.innerHTML = segments.map((s, i) => `
+    <div class="file-card row between mb">
+      <div class="row" style="min-width:0;flex:1">
+        <span class="badge neutral">${i + 1}</span>
+        <span class="name">${esc(s.name)}</span>
+        <span class="mono small muted">${s.start.toFixed(2)}s → ${s.end.toFixed(2)}s · ${(s.end - s.start).toFixed(2)}s</span>
+        <span class="badge">${s.sr} Hz</span>
+        <span class="badge">${s.channels === 2 ? "立体声" : s.channels === 1 ? "单声道" : s.channels + "ch"}</span>
+      </div>
+      <div class="row">
+        <button class="btn-sm" data-up="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
+        <button class="btn-sm" data-down="${i}" ${i === segments.length - 1 ? "disabled" : ""}>↓</button>
+        <button class="btn-sm btn-danger" data-del="${i}">✕</button>
+      </div>
+    </div>`).join("");
+
+  const fade = currentFade();
+  let total = 0, overlap = 0;
+  segments.forEach(s => { total += s.end - s.start; });
+  for (let i = 0; i + 1 < segments.length; i++) {
+    const d1 = segments[i].end - segments[i].start;
+    const d2 = segments[i + 1].end - segments[i + 1].start;
+    overlap += Math.min(fade, d1 / 2, d2 / 2);
+  }
+  const out = Math.max(0, total - overlap);
+  $("#totalLabel").textContent = fade > 0
+    ? `预计总时长 ≈ ${out.toFixed(2)}s（${segments.length} 段 · 淡化重叠 ${overlap.toFixed(2)}s）`
+    : `预计总时长 ≈ ${out.toFixed(2)}s（${segments.length} 段 · 硬拼接）`;
+}
+
+$("#segList").addEventListener("click", e => {
+  const d = e.target.dataset;
+  if (d.up != null) {
+    const i = +d.up;
+    [segments[i - 1], segments[i]] = [segments[i], segments[i - 1]];
+    renderSegments();
+  } else if (d.down != null) {
+    const i = +d.down;
+    [segments[i + 1], segments[i]] = [segments[i], segments[i + 1]];
+    renderSegments();
+  } else if (d.del != null) {
+    segments.splice(+d.del, 1);
+    renderSegments();
+  }
+});
+
+/* ---- settings ------------------------------------------------------------ */
+
+function syncJoinUI() {
+  const xfade = $("#joinMode").value === "xfade";
+  $("#fadeSec").disabled = !xfade;
+  $("#curve").disabled = !xfade;
+  renderSegments();
+}
+$("#joinMode").onchange = syncJoinUI;
+$("#fadeSec").oninput = renderSegments;
+
+/* ---- run ----------------------------------------------------------------- */
+
+$("#concatBtn").onclick = async () => {
+  if (segments.length < 2) return toast("至少需要 2 个片段", "warn");
+  const btn = $("#concatBtn");
+  btn.disabled = true; btn.textContent = "拼接中…";
+  try {
+    const body = {
+      segments: segments.map(s => ({ file_id: s.file_id, start: s.start, end: s.end })),
+      crossfade: currentFade(),
+      curve: $("#curve").value,
+      sample_rate: $("#outSr").value ? +$("#outSr").value : null,
+      channels: $("#outCh").value ? +$("#outCh").value : null,
+      name: $("#outName").value || "拼接结果.wav",
+    };
+    const entry = await API.post("/api/concat", body);
+    $("#resultCard").classList.remove("hidden");
+    $("#resultRow").innerHTML = `
+      <button class="btn-sm" onclick="playFile('${entry.id}','${esc(entry.name)}')">▶ 播放</button>
+      <a class="btn btn-sm" href="${API.downloadUrl(entry.id)}">下载</a>
+      <a class="btn btn-sm" href="/export?file=${entry.id}">去导出</a>
+      <span class="muted">${esc(entry.name)} · ${fmtTime(entry.duration)} · ${entry.sr} Hz · ${entry.channels === 2 ? "立体声" : entry.channels === 1 ? "单声道" : entry.channels + " 声道"}</span>`;
+    toast("拼接完成，已加入音频库", "success");
+    loadFiles(true);
+  } catch (e) { toast(e.message, "error"); }
+  finally { btn.disabled = false; btn.textContent = "▶ 开始拼接"; }
+};
+
+$("#loadBtn").onclick = loadWave;
+$("#fileSel").onchange = loadWave;
+
+(async () => {
+  await loadFiles();
+  renderSegments();
+  syncJoinUI();
+  await loadWave();
+})();
+</script>
+{% endblock %}

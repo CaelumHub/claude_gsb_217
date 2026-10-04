@@ -228,6 +228,12 @@ class WavReader:
                 break
             yield chunk
 
+    def seek(self, frame: int) -> None:
+        """Reposition the read cursor to ``frame`` (clamped to the file)."""
+        frame = max(0, min(int(frame), self.nframes))
+        self._w.setpos(frame)
+        self._pos = frame
+
     def _is_float(self) -> bool:
         # Heuristic: IEEE-float WAV is signalled by the 'WAVE_FORMAT_IEEE_FLOAT'
         # fmt tag (3).  wave exposes it only through comptype in some builds, so

@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 
-from backend import analysis, audio_io, chords, effects, mixer, realtime, separation, storage
+from backend import analysis, audio_io, chords, concat, effects, mixer, realtime, separation, storage
 
 try:
     from flask_cors import CORS
@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     _CORS = False
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.environ.get("AUDIO_DATA_DIR", os.path.join(BASE_DIR, "data"))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512 MB upload cap
@@ -86,6 +86,7 @@ def _register_derived(source_id: str, name: str, wav_path: str,
 PAGES = {
     "library": "音频库",
     "waveform": "波形编辑",
+    "concat": "合并拼接",
     "spectrogram": "频谱分析",
     "pitch_beat": "音高与节拍",
     "chords": "和弦识别",
@@ -390,6 +391,59 @@ def api_edit(file_id: str):
     _apply_edit(_abs_path(entry), dst, op, data.get("params", {}))
     new_entry = _register_derived(entry["id"], name, dst, {"op": op})
     return jsonify(new_entry)
+
+
+# --------------------------------------------------------------------------- #
+# Concat / splice
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/concat")
+def api_concat():
+    """Splice an ordered list of segments (whole files or [start, end) excerpts,
+    possibly several from the same file) into one new library file."""
+    data = request.get_json(force=True) or {}
+    specs = data.get("segments") or []
+    if not isinstance(specs, list) or not (2 <= len(specs) <= concat.MAX_SEGMENTS):
+        return jsonify(error=f"需要 2–{concat.MAX_SEGMENTS} 个片段"), 400
+
+    segments = []
+    first_id = None
+    try:
+        for s in specs:
+            e = _entry((s or {}).get("file_id"))
+            if not e:
+                return jsonify(error="片段引用的文件不存在"), 404
+            seg = {"path": _abs_path(e)}
+            if s.get("start") is not None:
+                seg["start"] = float(s["start"])
+            if s.get("end") is not None:
+                seg["end"] = float(s["end"])
+            segments.append(seg)
+            first_id = first_id or e["id"]
+    except (TypeError, ValueError):
+        return jsonify(error="片段起止时间无效"), 400
+
+    file_id_new = storage.new_id()
+    dst = os.path.join(store.audio_dir, file_id_new + ".wav")
+    try:
+        result = concat.concatenate(
+            segments, dst,
+            target_sr=data.get("sample_rate") or None,
+            target_ch=data.get("channels") or None,
+            crossfade_s=float(data.get("crossfade", 0.0) or 0.0),
+            curve=data.get("curve", "equal_power"),
+        )
+    except ValueError as e:
+        if os.path.exists(dst):
+            os.unlink(dst)
+        return jsonify(error=str(e)), 400
+
+    name = data.get("name") or f"concat-{len(segments)}seg.wav"
+    entry = _register_derived(first_id, name, dst, {
+        "op": "concat",
+        "concat": {"segments": len(segments), **result},
+    })
+    return jsonify(entry)
 
 
 # --------------------------------------------------------------------------- #

@@ -100,6 +100,7 @@ function srcBadge(f) {
   if (f.separation) return `<span class="badge purple">分离</span>`;
   if (f.project_id) return `<span class="badge green">混音</span>`;
   if (f.effects) return `<span class="badge purple">效果</span>`;
+  if (f.op === "concat") return `<span class="badge green">拼接</span>`;
   if (f.derived_from) return `<span class="badge">编辑</span>`;
   if (f.original_format === "generated") return `<span class="badge neutral">生成</span>`;
   return `<span class="badge neutral">${esc((f.original_format || "wav").toUpperCase())}</span>`;
