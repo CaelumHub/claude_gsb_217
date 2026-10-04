@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 
-from backend import analysis, audio_io, chords, effects, mixer, realtime, separation, storage
+from backend import analysis, audio_io, chords, concat, effects, mixer, realtime, separation, storage
 
 try:
     from flask_cors import CORS
@@ -86,6 +86,7 @@ def _register_derived(source_id: str, name: str, wav_path: str,
 PAGES = {
     "library": "音频库",
     "waveform": "波形编辑",
+    "concat": "合并拼接",
     "spectrogram": "频谱分析",
     "pitch_beat": "音高与节拍",
     "chords": "和弦识别",
@@ -524,6 +525,61 @@ def api_effects_apply():
     dst = os.path.join(store.audio_dir, file_id_new + ".wav")
     effects.apply_chain_to_file(_abs_path(entry), dst, chain)
     new_entry = _register_derived(entry["id"], name, dst, {"effects": chain})
+    return jsonify(new_entry)
+
+
+# --------------------------------------------------------------------------- #
+# Concatenation (合并拼接)
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/concat")
+def api_concat():
+    data = request.get_json(force=True) or {}
+    items = data.get("segments")
+    if not isinstance(items, list) or len(items) < 2:
+        return jsonify(error="at least two segments are required"), 400
+
+    mode = data.get("mode", "crossfade")
+    fade_s = float(data.get("fade_s", 0.5))
+    curve = data.get("curve", "equal_power")
+    dst_sr = data.get("sample_rate")
+    dst_ch = data.get("channels")
+
+    segments = []
+    first_id = None
+    for i, item in enumerate(items):
+        fid = item.get("file_id")
+        entry = _entry(fid)
+        if not entry:
+            return jsonify(error=f"segment {i + 1}: file {fid!r} not found"), 400
+        if first_id is None:
+            first_id = fid
+        segments.append({
+            "path": _abs_path(entry),
+            "start": item.get("start", 0.0),
+            "end": item.get("end"),
+        })
+
+    try:
+        file_id_new = storage.new_id()
+        dst = os.path.join(store.audio_dir, file_id_new + ".wav")
+        result = concat.concatenate(
+            segments, dst, mode=mode, fade_s=fade_s, curve=curve,
+            target_sr=int(dst_sr) if dst_sr else None,
+            target_channels=int(dst_ch) if dst_ch else None,
+        )
+    except ValueError as e:
+        if os.path.exists(dst):
+            os.unlink(dst)
+        return jsonify(error=str(e)), 400
+
+    name = data.get("name") or f"拼接-{len(segments)}段.wav"
+    new_entry = _register_derived(
+        first_id, name, dst,
+        {"concat": {k: v for k, v in result.items()
+                    if k in ("mode", "curve", "xfades_s", "segments")},
+         "sources": [s.get("file_id") for s in items]},
+    )
     return jsonify(new_entry)
 
 
